@@ -110,6 +110,7 @@ Next section starts after a 5-second pause.
 
 ## Tips
 - Put each speaking chunk as its own paragraph (separated by a blank line). This makes timing and highlighting more natural.
+- Add a "1 2 3" at the beginning of your text if you want a countdown.
 - Use `--min-sec` to avoid very short flashes on tiny paragraphs (e.g., headings).
 - Use `--max-sec` if you want to cap very long passages.
 
