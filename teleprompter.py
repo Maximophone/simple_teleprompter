@@ -137,6 +137,8 @@ class Teleprompter:
         self.text.configure(state="disabled")
         # Tags for highlighting
         self.text.tag_configure("spoken", foreground="yellow")
+        # Tag for centering the displayed paragraph
+        self.text.tag_configure("align_center", justify="center")
 
         self.status = tk.Label(
             root,
@@ -293,6 +295,8 @@ class Teleprompter:
         self.text.configure(state="normal")
         self.text.delete("1.0", tk.END)
         self.text.insert("1.0", content)
+        self.text.tag_remove("spoken", "1.0", tk.END)
+        self.text.tag_add("align_center", "1.0", tk.END)
         self.text.configure(state="disabled")
 
     def _render_paragraph(self, text):
@@ -303,6 +307,7 @@ class Teleprompter:
         self.text.delete("1.0", tk.END)
         self.text.insert("1.0", text)
         self.text.tag_remove("spoken", "1.0", tk.END)
+        self.text.tag_add("align_center", "1.0", tk.END)
         self.text.configure(state="disabled")
         # Build word spans for non-break paragraphs
         override = self.duration_overrides_ms[self.idx] if 0 <= self.idx < len(self.duration_overrides_ms) else None
