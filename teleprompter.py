@@ -129,7 +129,7 @@ class Teleprompter:
             fg=opts.fg,
             bg=opts.bg,
             justify="left",
-            anchor="n",
+            anchor="nw",
             padx=opts.pad,
             pady=opts.pad,
             wraplength=width - 2 * opts.pad,
@@ -267,7 +267,15 @@ class Teleprompter:
         self.root.after(50, lambda: (self.root.deiconify(), self.root.geometry(geom)))
 
     def on_configure(self, evt):
-        wrap = max(50, evt.width - 2 * self.opts.pad)
+        # Defer wraplength update to when geometry has stabilized
+        self.root.after_idle(self.update_wraplength)
+
+    def update_wraplength(self):
+        # Prefer label's actual width; fall back to window width
+        label_width = self.text.winfo_width()
+        window_width = self.root.winfo_width()
+        available = label_width if label_width > 0 else window_width
+        wrap = max(200, available - 2 * self.opts.pad)
         self.text.config(wraplength=wrap)
 
     def begin_drag(self, evt):
