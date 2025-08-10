@@ -6,6 +6,11 @@
 #   python teleprompter.py mytext.md --wpm 150 --height 160 --font "Segoe UI" --size 28
 #   python teleprompter.py --text "Line 1\n\nLine 2" --spw 0.4
 #
+# Break syntax in Markdown/text:
+#   Insert "[break:X]" anywhere (own paragraph or inline) to pause for X seconds.
+#   Example:
+#     "First part. [break:3] Second part." → shows a 3s break between parts.
+#
 # Keys:
 #   Space/P  pause/resume       Right/Enter/Down  next paragraph
 #   Left/Up  previous           +/- (or keypad)   font bigger/smaller
@@ -23,6 +28,8 @@ import re
 import sys
 import tkinter as tk
 from tkinter import filedialog
+
+BREAK_TOKEN_RE = re.compile(r"\[break:(\d+(?:\.\d+)?)\]", re.IGNORECASE)
 
 def read_text(args):
     if args.text is not None:
@@ -48,11 +55,47 @@ def split_paragraphs(md_text):
     parts = [p.strip() for p in re.split(r"\n\s*\n+", text)]
     return [p for p in parts if p]
 
+def expand_breaks(paragraphs):
+    """Expand paragraphs by splitting on [break:X] tokens.
+
+    Returns (expanded_paragraphs, duration_overrides_ms) where overrides aligns
+    with expanded_paragraphs, containing an int duration in ms for breaks, or
+    None for normal text paragraphs.
+    """
+    expanded = []
+    overrides = []
+    for para in paragraphs:
+        last_end = 0
+        had_token = False
+        for match in BREAK_TOKEN_RE.finditer(para):
+            had_token = True
+            before = para[last_end:match.start()]
+            if before and before.strip():
+                expanded.append(before.strip())
+                overrides.append(None)
+            sec = float(match.group(1))
+            expanded.append(f"Break ({sec:g} s)")
+            overrides.append(int(sec * 1000))
+            last_end = match.end()
+        # Remainder
+        rest = para[last_end:]
+        if had_token:
+            if rest and rest.strip():
+                expanded.append(rest.strip())
+                overrides.append(None)
+        else:
+            expanded.append(para)
+            overrides.append(None)
+    return expanded, overrides
+
 class Teleprompter:
-    def __init__(self, root, paragraphs, opts):
+    def __init__(self, root, paragraphs, opts, duration_overrides_ms=None):
         self.root = root
         self.paragraphs = paragraphs
         self.opts = opts
+        self.duration_overrides_ms = (
+            list(duration_overrides_ms) if duration_overrides_ms is not None else [None] * len(paragraphs)
+        )
         self.idx = 0
         self.paused = False
         self.timer_id = None
@@ -161,7 +204,10 @@ class Teleprompter:
         self.set_status(f"{self.idx + 1}/{len(self.paragraphs)}")
         self.cancel_timer()
         if start_timer and not self.paused:
-            ms = self.paragraph_duration_ms(p)
+            override = None
+            if 0 <= self.idx < len(self.duration_overrides_ms):
+                override = self.duration_overrides_ms[self.idx]
+            ms = override if override is not None else self.paragraph_duration_ms(p)
             self.timer_id = self.root.after(ms, self.auto_next)
 
     def auto_next(self):
@@ -288,11 +334,12 @@ def main():
     root.withdraw()
     text = read_text(args)
     paras = split_paragraphs(text)
+    paras, overrides = expand_breaks(paras)
     if not paras:
         print("No non-empty paragraphs found (split on blank lines).", file=sys.stderr)
         sys.exit(1)
     root.deiconify()
-    Teleprompter(root, paras, args)
+    Teleprompter(root, paras, args, overrides)
     root.mainloop()
 
 if __name__ == "__main__":
