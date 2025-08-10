@@ -121,20 +121,22 @@ class Teleprompter:
         root.geometry(f"{width}x{height}+{x}+{y}")
         root.minsize(300, 80)
 
-        # UI
-        self.text = tk.Label(
+        # UI - main text area (use Text to allow per-word highlighting)
+        self.text = tk.Text(
             root,
-            text="",
             font=(self.font_family, self.font_size),
             fg=opts.fg,
             bg=opts.bg,
-            justify="left",
-            anchor="nw",
+            wrap="word",
             padx=opts.pad,
             pady=opts.pad,
-            wraplength=width - 2 * opts.pad,
+            borderwidth=0,
+            highlightthickness=0,
         )
         self.text.pack(fill="both", expand=True)
+        self.text.configure(state="disabled")
+        # Tags for highlighting
+        self.text.tag_configure("spoken", foreground="yellow")
 
         self.status = tk.Label(
             root,
@@ -171,6 +173,11 @@ class Teleprompter:
         root.bind("<ButtonPress-1>", self.begin_drag)
         root.bind("<B1-Motion>", self.do_drag)
 
+        # Word highlighting state
+        self.word_timer_id = None
+        self.word_spans = []  # list[(start_offset, end_offset)] in chars
+        self.current_word_index = -1
+
         # Start
         if opts.start_delay_ms > 0:
             self.set_status(f"Starting in {opts.start_delay_ms/1000:.1f}s…")
@@ -196,19 +203,25 @@ class Teleprompter:
 
     def show_current(self, start_timer=True):
         if not self.paragraphs:
-            self.text.config(text="(No paragraphs)")
+            self._set_text("(No paragraphs)")
             self.set_status("")
             return
         p = self.paragraphs[self.idx]
-        self.text.config(text=p, font=(self.font_family, self.font_size))
+        self._render_paragraph(p)
         self.set_status(f"{self.idx + 1}/{len(self.paragraphs)}")
         self.cancel_timer()
         if start_timer and not self.paused:
             override = None
             if 0 <= self.idx < len(self.duration_overrides_ms):
                 override = self.duration_overrides_ms[self.idx]
-            ms = override if override is not None else self.paragraph_duration_ms(p)
-            self.timer_id = self.root.after(ms, self.auto_next)
+            total_ms = override if override is not None else self.paragraph_duration_ms(p)
+            is_break = self._is_break_paragraph(p, override)
+            if is_break:
+                self.timer_id = self.root.after(total_ms, self.auto_next)
+            else:
+                # Drive the paragraph duration from the word-highlighting schedule,
+                # and call auto_next immediately after the last word is highlighted.
+                self._start_word_highlighting(total_ms)
 
     def auto_next(self):
         if self.idx < len(self.paragraphs) - 1:
@@ -245,6 +258,12 @@ class Teleprompter:
             except Exception:
                 pass
             self.timer_id = None
+        if self.word_timer_id is not None:
+            try:
+                self.root.after_cancel(self.word_timer_id)
+            except Exception:
+                pass
+            self.word_timer_id = None
 
     def font_bigger(self, _evt=None):
         self.font_size = min(self.font_size + 2, 200)
@@ -266,17 +285,108 @@ class Teleprompter:
         self.root.withdraw()
         self.root.after(50, lambda: (self.root.deiconify(), self.root.geometry(geom)))
 
-    def on_configure(self, evt):
-        # Defer wraplength update to when geometry has stabilized
-        self.root.after_idle(self.update_wraplength)
+    def on_configure(self, _evt):
+        # Text widget wraps automatically by word; nothing needed here.
+        pass
 
-    def update_wraplength(self):
-        # Prefer label's actual width; fall back to window width
-        label_width = self.text.winfo_width()
-        window_width = self.root.winfo_width()
-        available = label_width if label_width > 0 else window_width
-        wrap = max(200, available - 2 * self.opts.pad)
-        self.text.config(wraplength=wrap)
+    def _set_text(self, content):
+        self.text.configure(state="normal")
+        self.text.delete("1.0", tk.END)
+        self.text.insert("1.0", content)
+        self.text.configure(state="disabled")
+
+    def _render_paragraph(self, text):
+        # Prepare text and reset word highlighting state
+        self.word_spans = []
+        self.current_word_index = -1
+        self.text.configure(state="normal")
+        self.text.delete("1.0", tk.END)
+        self.text.insert("1.0", text)
+        self.text.tag_remove("spoken", "1.0", tk.END)
+        self.text.configure(state="disabled")
+        # Build word spans for non-break paragraphs
+        override = self.duration_overrides_ms[self.idx] if 0 <= self.idx < len(self.duration_overrides_ms) else None
+        if not self._is_break_paragraph(text, override):
+            for m in re.finditer(r"\S+", text):
+                self.word_spans.append((m.start(), m.end()))
+
+    def _is_break_paragraph(self, text, override):
+        # Treat generated Break paragraphs (from [break:x]) as breaks
+        return (override is not None) and text.strip().lower().startswith("break (")
+
+    def _start_word_highlighting(self, total_ms):
+        if not self.word_spans:
+            # No words detected; just advance after the duration to keep timing
+            self.timer_id = self.root.after(max(0, int(total_ms)), self.auto_next)
+            return
+        words_count = len(self.word_spans)
+        if total_ms <= 0:
+            # No time to highlight; jump to end immediately
+            self._highlight_up_to(words_count - 1)
+            self.auto_next()
+            return
+        # Highlight first word immediately
+        self._highlight_up_to(0)
+        if words_count == 1:
+            # Single-word paragraph: keep it highlighted for total_ms, then advance
+            self.word_timer_id = self.root.after(int(total_ms), self.auto_next)
+            return
+        # We want the last word to remain visible for one word-interval at the end.
+        # Compute integer timings that sum exactly to total_ms.
+        # Split total_ms into (words_count - 1) transition intervals and a final hold interval.
+        # Last hold approximates one per-word duration.
+        per_word_floor = int(total_ms // words_count)
+        extra = int(total_ms % words_count)
+        last_hold_ms = per_word_floor + (1 if extra > 0 else 0)
+        remaining_ms = int(total_ms - last_hold_ms)
+        transitions = words_count - 1
+        base_transition = int(remaining_ms // transitions)
+        remainder_transition = int(remaining_ms % transitions)
+        self._word_intervals_ms = [base_transition + (1 if i < remainder_transition else 0) for i in range(transitions)]
+        self._next_interval_idx = 0
+
+        def schedule_next():
+            if self.paused:
+                return
+            if self._next_interval_idx >= len(self._word_intervals_ms):
+                # Finished last transition; hold on the last word, then advance
+                self.word_timer_id = None
+                self.timer_id = self.root.after(max(1, int(last_hold_ms)), self.auto_next)
+                return
+            delay = self._word_intervals_ms[self._next_interval_idx]
+
+            def tick():
+                if self.paused:
+                    return
+                next_index = self.current_word_index + 1
+                if next_index < len(self.word_spans):
+                    self._highlight_up_to(next_index)
+                    try:
+                        start, _ = self.word_spans[next_index]
+                        self.text.see(f"1.0+{start}c")
+                    except Exception:
+                        pass
+                    self._next_interval_idx += 1
+                    schedule_next()
+                else:
+                    # Safety: if we reached beyond, finalize
+                    self.word_timer_id = None
+                    self.timer_id = self.root.after(1, self.auto_next)
+
+            self.word_timer_id = self.root.after(max(1, int(delay)), tick)
+
+        schedule_next()
+
+    def _highlight_up_to(self, word_index):
+        if not self.word_spans:
+            return
+        self.current_word_index = max(0, min(word_index, len(self.word_spans) - 1))
+        # Apply tag to range covering words [0, current_word_index]
+        start_char = self.word_spans[0][0]
+        end_char = self.word_spans[self.current_word_index][1]
+        self.text.configure(state="normal")
+        self.text.tag_add("spoken", f"1.0+{start_char}c", f"1.0+{end_char}c")
+        self.text.configure(state="disabled")
 
     def begin_drag(self, evt):
         if not self.borderless:
